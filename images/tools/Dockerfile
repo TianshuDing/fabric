@@ -6,6 +6,10 @@ ARG GO_VER
 ARG ALPINE_VER
 FROM golang:${GO_VER}-alpine${ALPINE_VER} as golang
 
+
+# 换源加速镜像下载
+RUN set -eux && sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories
+
 RUN apk add --no-cache \
 	bash \
 	gcc \
@@ -21,6 +25,10 @@ ARG GO_TAGS
 RUN make configtxgen configtxlator cryptogen peer discover osnadmin idemixgen GO_TAGS=${GO_TAGS}
 
 FROM golang:${GO_VER}-alpine
+
+# 换源加速镜像下载
+RUN set -eux && sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories
+
 # git is required to support `go list -m`
 RUN apk add --no-cache \
 	bash \
