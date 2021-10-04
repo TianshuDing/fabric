@@ -349,12 +349,14 @@ func NewChain(
 func (c *Chain) Start() {
 	c.logger.Infof("Starting Raft node")
 
+	// 配置通信层，具体待挖掘
 	if err := c.configureComm(); err != nil {
 		c.logger.Errorf("Failed to start chain, aborting: +%v", err)
 		close(c.doneC)
 		return
 	}
 
+	// 节点是否以加入channel
 	isJoin := c.support.Height() > 1
 	if isJoin && c.opts.MigrationInit {
 		isJoin = false

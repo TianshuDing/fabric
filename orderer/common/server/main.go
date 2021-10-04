@@ -57,9 +57,10 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
+// fabric项目自定义的一种logger，实现不同等级的日志打印；日志内容丰富，时间、文件、错误类型等
 var logger = flogging.MustGetLogger("orderer.common.server")
 
-//command line flags
+//command line flags 用于解析程序启动时所携带的参数
 var (
 	app = kingpin.New("orderer", "Hyperledger Fabric orderer node")
 
@@ -79,53 +80,76 @@ func Main() {
 		return
 	}
 
+	// conf为一个指向TopLevel结构体类型的指针，TopLevel与orderer.yaml文件中保存的配置一一对应
 	conf, err := localconfig.Load()
 	if err != nil {
 		logger.Error("failed to parse config: ", err)
 		os.Exit(1)
 	}
+	// 日志等级、格式相关
 	initializeLogging()
 
+	// 疑似打印提示conf内容，pretty意思是简略conf内容，避免内容过长
 	prettyPrintStruct(conf)
 
 	cryptoProvider := factory.GetDefault()
 
+	// loadLocalMSP根据以读取的conf，返回一个MSP接口；MSP接口使用GetDefaultSigningIdentity方法返回SigningIdentity接口和错误
+	// loadLocalMSP(conf)返回一个MSP接口，实际为bccspmsp结构体；
+	// GetDefaultSigningIdentity()返回一个SigningIdentity接口，实际为signingidentity结构体
 	signer, signErr := loadLocalMSP(conf).GetDefaultSigningIdentity()
 	if signErr != nil {
 		logger.Panicf("Failed to get local MSP identity: %s", signErr)
 	}
 
+	// 根据conf.Operations、conf.Metrics创建一个指向operations.System结构体类型的指针，然后调用该类型的Start方法
+	// 该服务用于管理节点健康状态，后续节点启动过程中通过opsSystem中的metricsProvider创建一些Metrics，会随着系统运行
+	// 实时更新，可有opsSystem操作并通过网页查看健康状况
 	opsSystem := newOperationsSystem(conf.Operations, conf.Metrics)
+	// 在某个端口启动http服务，用于运维
 	if err = opsSystem.Start(); err != nil {
 		logger.Panicf("failed to start operations subsystem: %s", err)
 	}
 	defer opsSystem.Stop()
+
+	// 谜之操作，看不懂是啥、为啥
+	// 见opsSystem简介
 	metricsProvider := opsSystem.Provider
 	logObserver := floggingmetrics.NewObserver(metricsProvider)
 	flogging.SetObserver(logObserver)
 
+	// serverConfig、grpcServer
+	// 初始化TLS认证的安全服务器配置项和gRPC服务器
 	serverConfig := initializeServerConfig(conf, metricsProvider)
 	grpcServer := initializeGrpcServer(conf, serverConfig)
+	// caMgr管理按通道范围的证书颁发机构
 	caMgr := &caManager{
 		appRootCAsByChain:     make(map[string][][]byte),
 		ordererRootCAsByChain: make(map[string][][]byte),
 		clientRootCAs:         serverConfig.SecOpts.ClientRootCAs,
 	}
 
+	// 创建账本工厂，返回一个接口和错误，看似是一个interface类型，深入函数发现返回一个fileLedgerFactory结构体类型
+	// 该结构体类型实现了interface中的方法，可以被用作该类型参数传入或返回
 	lf, err := createLedgerFactory(conf, metricsProvider)
 	if err != nil {
 		logger.Panicf("Failed to create ledger factory: %v", err)
 	}
 
+	// bootstrapBlock声名
 	var bootstrapBlock *cb.Block
+	// 读取bootstrap方法
 	switch conf.General.BootstrapMethod {
 	case "file":
+		// 通过读取账本工厂中通道数量判断是否存在system channel
 		if len(lf.ChannelIDs()) > 0 {
 			logger.Info("Not bootstrapping the system channel because of existing channels")
 			break
 		}
 
+		// BootstrapFile提供了创世区块存放地址，在节点启动前会通过其他二进制工具生成创世区块
 		bootstrapBlock = file.New(conf.General.BootstrapFile).GenesisBlock()
+		// 字面意思，没深入看，应该是校验区块真实性
 		if err := onboarding.ValidateBootstrapBlock(bootstrapBlock, cryptoProvider); err != nil {
 			logger.Panicf("Failed validating bootstrap block: %v", err)
 		}
@@ -137,6 +161,7 @@ func Main() {
 
 		// bootstrapping with a genesis block (i.e. bootstrap block number = 0)
 		// generate the system channel with a genesis block.
+		// 创建system channel并将bootstrapBlock写入该channel的区块链数据
 		logger.Info("Bootstrapping the system channel")
 		initializeBootstrapChannel(bootstrapBlock, lf)
 	case "none":
@@ -146,29 +171,39 @@ func Main() {
 	}
 
 	// select the highest numbered block among the bootstrap block and the last config block if the system channel.
+	// 通过账本工厂获取系统通道中的最新配置区块
 	sysChanConfigBlock := extractSystemChannel(lf, cryptoProvider)
+	// 在bootstrapBlock和sysChanConfigBlock中选择一个赋值给clusterBootBlock
+	// 谁为空赋值另一个，均存在则选择谁最新
 	clusterBootBlock := selectClusterBootBlock(bootstrapBlock, sysChanConfigBlock)
 
 	// determine whether the orderer is of cluster type
+	// 确定orderer是否属于集群类型
 	var isClusterType bool
 	if clusterBootBlock == nil {
 		logger.Infof("Starting without a system channel")
 		isClusterType = true
 	} else {
+		// 获取系统通道ID
 		sysChanID, err := protoutil.GetChannelIDFromBlock(clusterBootBlock)
 		if err != nil {
 			logger.Panicf("Failed getting channel ID from clusterBootBlock: %s", err)
 		}
-
+		// 获取clusterBootBlock中定义的共识名称
 		consensusTypeName := consensusType(clusterBootBlock, cryptoProvider)
 		logger.Infof("Starting with system channel: %s, consensus type: %s", sysChanID, consensusTypeName)
 		_, isClusterType = clusterTypes[consensusTypeName]
 	}
 
 	// configure following artifacts properly if orderer is of cluster type
+	// 如果orderer是集群类型，正确配置一下artifacts
+	// ReplicationInitiator ???
+	// 同步器，如果clusterBootBlock高度>0，认为节点需要向其他节点同步区块数据
 	var repInitiator *onboarding.ReplicationInitiator
+	// cluster服务端默认共用serverConfig和grpcServer
 	clusterServerConfig := serverConfig
 	clusterGRPCServer := grpcServer // by default, cluster shares the same grpc server
+	//与cluster客户端相关，每个orderer即是服务器又是客户端，实现消息传输形成共识
 	var clusterClientConfig comm.ClientConfig
 	var clusterDialer *cluster.PredicateDialer
 
@@ -177,11 +212,12 @@ func Main() {
 
 	if isClusterType {
 		logger.Infof("Setting up cluster")
+		// 获取conf中关于cluster客户端的配置信息
 		clusterClientConfig = initializeClusterClientConfig(conf)
 		clusterDialer = &cluster.PredicateDialer{
 			Config: clusterClientConfig,
 		}
-
+		// 判断cluster是否共用gRPC的配置
 		if reuseGrpcListener = reuseListener(conf); !reuseGrpcListener {
 			clusterServerConfig, clusterGRPCServer = configureClusterListener(conf, serverConfig, ioutil.ReadFile)
 		}
@@ -192,17 +228,20 @@ func Main() {
 
 		// If the orderer has a system channel and is of cluster type, it may have
 		// to replicate first.
+		// orderer是集群类型且拥有系统通道，通道中的clusterBootBlock存在
 		if clusterBootBlock != nil {
 			// When we are bootstrapping with a clusterBootBlock with number >0,
 			// replication will be performed. Only clusters that are equipped with
 			// a recent config block (number i.e. >0) can replicate. This will
 			// replicate all channels if the clusterBootBlock number > system-channel
 			// height (i.e. there is a gap in the ledger).
+			// repInitiator用于当clusterBootBlock高度>0时，需要向其他节点复制前面的区块
 			repInitiator = onboarding.NewReplicationInitiator(lf, clusterBootBlock, conf, clusterClientConfig.SecOpts, signer, cryptoProvider)
 			repInitiator.ReplicateIfNeeded(clusterBootBlock)
 			// With BootstrapMethod == "none", the bootstrapBlock comes from a
 			// join-block. If it exists, we need to remove the system channel
 			// join-block from the filerepo.
+			// 新版本特性，无系统通道启动配置
 			if conf.General.BootstrapMethod == "none" && bootstrapBlock != nil {
 				discardSystemChannelJoinBlock(conf, bootstrapBlock)
 			}
@@ -215,6 +254,7 @@ func Main() {
 	}
 
 	expirationLogger := flogging.MustGetLogger("certmonitor")
+	// TrackExpiration在其中一个证书过期前一周发出警告
 	crypto.TrackExpiration(
 		serverConfig.SecOpts.UseTLS,
 		serverConfig.SecOpts.Certificate,
@@ -227,6 +267,8 @@ func Main() {
 
 	// if cluster is reusing client-facing server, then it is already
 	// appended to serversToUpdate at this point.
+	// MutualTLSRequired判断grpcServer是否需要证书
+	// reuseGrpcListener表示cluster是否复用grpc配置
 	if grpcServer.MutualTLSRequired() && !reuseGrpcListener {
 		serversToUpdate = append(serversToUpdate, grpcServer)
 	}
@@ -242,6 +284,7 @@ func Main() {
 		}
 	}
 
+	// 创建多通道注册管理器
 	manager := initializeMultichannelRegistrar(
 		clusterBootBlock,
 		repInitiator,
@@ -269,6 +312,7 @@ func Main() {
 	defer adminServer.Stop()
 
 	mutualTLS := serverConfig.SecOpts.UseTLS && serverConfig.SecOpts.RequireClientCert
+	// 创建orderer服务器
 	server := NewServer(
 		manager,
 		metricsProvider,
@@ -279,6 +323,7 @@ func Main() {
 	)
 
 	logger.Infof("Starting %s", metadata.GetVersionInfo())
+	// 貌似检测命令行指令，停止服务
 	handleSignals(addPlatformSignals(map[os.Signal]func(){
 		syscall.SIGTERM: func() {
 			grpcServer.Stop()
@@ -288,16 +333,20 @@ func Main() {
 		},
 	}))
 
+	// 如果是集群，并且没有共用general中的IP、Port，启动单独的cluster服务
 	if !reuseGrpcListener && isClusterType {
 		logger.Info("Starting cluster listener on", clusterGRPCServer.Address())
 		go clusterGRPCServer.Start()
 	}
 
+	// 启动profile服务，与go tool pprof相关的性能分析工具
 	if conf.General.Profile.Enabled {
 		go initializeProfilingService(conf)
 	}
+	// 绑定gRPC服务
 	ab.RegisterAtomicBroadcastServer(grpcServer.Server(), server)
 	logger.Info("Beginning to serve requests")
+	// 启动gRPC服务
 	if err := grpcServer.Start(); err != nil {
 		logger.Fatalf("Atomic Broadcast gRPC server has terminated while serving requests due to: %v", err)
 	}
@@ -380,7 +429,7 @@ func reuseListener(conf *localconfig.TopLevel) bool {
 	// it means we use the general listener of the node.
 	if clusterConf.ListenPort == 0 && clusterConf.ServerCertificate == "" && clusterConf.ListenAddress == "" && clusterConf.ServerPrivateKey == "" {
 		logger.Info("Cluster listener is not configured, defaulting to use the general listener on port", conf.General.ListenPort)
-
+		// 如果公用gRPC服务IP和端口，需要使能TLS
 		if !conf.General.TLS.Enabled {
 			logger.Panicf("TLS is required for running ordering nodes of cluster type.")
 		}
@@ -389,6 +438,7 @@ func reuseListener(conf *localconfig.TopLevel) bool {
 	}
 
 	// Else, one of the above is defined, so all 4 properties should be defined.
+	// 如果不满足前一个if的条件，即是需要单独配置cluster服务的配置，需要完善这四项；否则panic
 	if clusterConf.ListenPort == 0 || clusterConf.ServerCertificate == "" || clusterConf.ListenAddress == "" || clusterConf.ServerPrivateKey == "" {
 		logger.Panic("Options: General.Cluster.ListenPort, General.Cluster.ListenAddress, General.Cluster.ServerCertificate, General.Cluster.ServerPrivateKey, should be defined altogether.")
 	}
@@ -400,6 +450,7 @@ func reuseListener(conf *localconfig.TopLevel) bool {
 // config block for the system channel. Returns nil if no system channel
 // was found.
 func extractSystemChannel(lf blockledger.Factory, bccsp bccsp.BCCSP) *cb.Block {
+	// 循环查询账本工厂中所有channel
 	for _, cID := range lf.ChannelIDs() {
 		channelLedger, err := lf.GetOrCreate(cID)
 		if err != nil {
@@ -700,15 +751,18 @@ func extractBootstrapBlock(conf *localconfig.TopLevel) *cb.Block {
 }
 
 func initializeBootstrapChannel(genesisBlock *cb.Block, lf blockledger.Factory) {
+	// channel ID获取
 	channelID, err := protoutil.GetChannelIDFromBlock(genesisBlock)
 	if err != nil {
 		logger.Fatal("Failed to parse channel ID from genesis block:", err)
 	}
+	// 返回一个FileLedger结构体（结构体实现了接口的方法）
 	gl, err := lf.GetOrCreate(channelID)
 	if err != nil {
 		logger.Fatal("Failed to create the system channel:", err)
 	}
 	if gl.Height() == 0 {
+		// FileLedger向区块链写入创世区块
 		if err := gl.Append(genesisBlock); err != nil {
 			logger.Fatal("Could not write genesis block to ledger:", err)
 		}

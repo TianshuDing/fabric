@@ -22,12 +22,12 @@ var logger = flogging.MustGetLogger("localconfig")
 
 // TopLevel directly corresponds to the orderer config YAML.
 type TopLevel struct {
-	General              General
-	FileLedger           FileLedger
-	Kafka                Kafka
-	Debug                Debug
-	Consensus            interface{}
-	Operations           Operations
+	General              General     // 通用配置对象
+	FileLedger           FileLedger  // 文本账本配置对象
+	Kafka                Kafka       // kafka共识组建配置对象
+	Debug                Debug       // 调试信息配置对象
+	Consensus            interface{} // 万能interface对象
+	Operations           Operations  // 运维信息对象
 	Metrics              Metrics
 	ChannelParticipation ChannelParticipation
 	Admin                Admin

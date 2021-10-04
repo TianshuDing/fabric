@@ -23,6 +23,11 @@ type Consenter interface {
 	// The second argument to HandleChain is a pointer to the metadata stored on the `ORDERER` slot of
 	// the last block committed to the ledger of this Chain. For a new chain, or one which is migrated,
 	// this metadata will be nil (or contain a zero-length Value), as there is no prior metadata to report.
+
+	// HandleChain 应该为给定的资源集创建并返回一个对链的引用。
+	// 它在每个进程中只对一个给定的链调用一次。 一般来说，错误将被视为不可恢复的，并导致系统关闭。 更多细节请参见Chain的描述
+	// HandleChain的第二个参数是一个指向元数据的指针，该元数据存储在该链最后一个提交到账本的区块的`ORDERER`槽上。
+	// 对于一个新的链，或者一个被迁移的链。该元数据将为零（或包含一个零长度的Value），因为没有先前的元数据需要报告。
 	HandleChain(support ConsenterSupport, metadata *cb.Metadata) (Chain, error)
 }
 
@@ -32,6 +37,10 @@ type ClusterConsenter interface {
 	// channel. It returns true if the orderer is a member of the consenters set, and false if it is not. The method
 	// also inspects the consensus type metadata for validity. It returns an error if membership cannot be determined
 	// due to errors processing the block.
+
+	// IsChannelMember 检查加入块，并检测它是否暗示该orderer是该通道的成员。
+	// 如果orderer是consenters集合的成员，则返回true，如果不是，则返回false。
+	// 该方法还检查了共识类型元数据的有效性。如果由于处理区块的错误而不能确定成员资格，它将返回一个错误。
 	IsChannelMember(joinBlock *cb.Block) (bool, error)
 	// RemoveInactiveChainRegistry stops and removes the inactive chain registry.
 	// This is used when removing the system channel.
@@ -55,6 +64,13 @@ type MetadataValidator interface {
 // and ultimately write the ledger also supplied via HandleChain.  This design allows for two primary flows
 // 1. Messages are ordered into a stream, the stream is cut into blocks, the blocks are committed (solo, kafka)
 // 2. Messages are cut into blocks, the blocks are ordered, then the blocks are committed (sbft)
+
+// Chain 链定义了一种注入信息进行排序的方法。
+// 注意，为了允许实现的灵活性，实现者有责任接收订购的消息，通过HandleChain提供的blockcutter.Receiver来切割块，
+// 并最终写入同样通过HandleChain提供的分类账。 这种设计允许两个主要流程
+// 1. 消息被订购到一个流中，流被切割成块，块被提交（solo，kafka）。
+// 2. 消息被切割成块，块被排序，然后块被提交（sbft）。
+// chainsupport结构体实现了该接口，
 type Chain interface {
 	// Order accepts a message which has been processed at a given configSeq.
 	// If the configSeq advances, it is the responsibility of the consenter

@@ -133,6 +133,7 @@ func (mt *MetricsTracker) BeginEnqueue() {
 }
 
 // ProcessMessage validates and enqueues a single message
+// 验证并排队等待一个单一的消息
 func (bh *Handler) ProcessMessage(msg *cb.Envelope, addr string) (resp *ab.BroadcastResponse) {
 	tracker := &MetricsTracker{
 		ChannelID: "unknown",
@@ -147,6 +148,7 @@ func (bh *Handler) ProcessMessage(msg *cb.Envelope, addr string) (resp *ab.Broad
 	}()
 	tracker.BeginValidate()
 
+	// 消息通道header，是否为配置消息，获取对应处理消息的process（chainSupprot结构体），错误标志
 	chdr, isConfig, processor, err := bh.SupportRegistrar.BroadcastChannelSupport(msg)
 	if chdr != nil {
 		tracker.ChannelID = chdr.ChannelId
